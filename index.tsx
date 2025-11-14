@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-// BUG FIX: The class name is GoogleGenerativeAI, not GoogleGenAI
-import { GoogleGenerativeAI } from '@google/genai';
+// BUG FIX (Line 4): Import *all* exports from the module as 'genai'
+import * as genai from '@google/genai';
 import { marked } from 'marked';
 import { Chart, BarController, BarElement, CategoryScale, LinearScale, Tooltip, Legend } from 'chart.js';
 import mammoth from 'mammoth';
@@ -285,8 +285,9 @@ const App = () => {
     // Any user can view your key and use it, leading to unexpected charges.
     // For production, this logic should be moved to a secure backend (e.g., a serverless function)
     // that proxies the request to the GenAI API.
-    // BUG FIX: The class name is GoogleGenerativeAI, not GoogleGenAI
-    const ai = useMemo(() => new GoogleGenerativeAI({ apiKey: process.env.API_KEY as string }), []);
+    
+    // BUG FIX (Line 230): Instantiate the class from the 'genai' module
+    const ai = useMemo(() => new genai.GoogleGenerativeAI({ apiKey: process.env.API_KEY as string }), []);
 
     useEffect(() => {
         if (!firebaseInitialized || !auth) return;
@@ -428,6 +429,7 @@ ${resumeText}
 `;
 
             // This (and the other model calls) uses the modern v1 SDK syntax
+            // Now 'ai' is correctly instantiated, so 'getGenerativeModel' will exist.
             const model = ai.getGenerativeModel({
                 model: 'gemini-flash-latest',
                 generationConfig: { responseMimeType: "application/json" },
@@ -467,7 +469,7 @@ ${resumeText}
             - Desired Annual Salary Range (INR): ${salaryRange || 'Not specified'}
             - Career Goals: ${userProfile.careerGoals || 'Not specified'}
 
-            Use this profile to further refine the job search. Prioritize roles matching the preferred titles and locations. Consider the salary range and career goals when evaluating relevance.
+            Use this profile to further refine the job search. Prioritize roles matching the preferred titles and locations. Consider the salary range and career goals whenevaluating relevance.
             `;
         }
 
