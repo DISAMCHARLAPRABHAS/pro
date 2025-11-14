@@ -1,7 +1,7 @@
-
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-import { GoogleGenAI, Type } from '@google/genai';
+// BUG FIX: Removed 'Type' as it's not exported in the v1 SDK
+import { GoogleGenAI } from '@google/genai';
 import { marked } from 'marked';
 import { Chart, BarController, BarElement, CategoryScale, LinearScale, Tooltip, Legend } from 'chart.js';
 import mammoth from 'mammoth';
@@ -281,6 +281,10 @@ const App = () => {
     const [isGeneratingPreview, setIsGeneratingPreview] = useState(false);
     const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
 
+    // SECURITY WARNING: Exposing an API key client-side is a significant security risk.
+    // Any user can view your key and use it, leading to unexpected charges.
+    // For production, this logic should be moved to a secure backend (e.g., a serverless function)
+    // that proxies the request to the GenAI API.
     const ai = useMemo(() => new GoogleGenAI({ apiKey: process.env.API_KEY as string }), []);
 
     useEffect(() => {
@@ -401,33 +405,41 @@ const App = () => {
         setAnalysisResult(null);
 
         try {
-            const analysisSchema = {
-                type: Type.OBJECT,
-                properties: {
-                    summary: { type: Type.STRING, description: "A concise two-sentence summary of the candidate's profile." },
-                    skills: {
-                        type: Type.ARRAY, items: {
-                            type: Type.OBJECT, properties: {
-                                skillName: { type: Type.STRING },
-                                prevalence: { type: Type.NUMBER, description: "Score from 1 (low) to 5 (high)." }
-                            }, required: ["skillName", "prevalence"]
-                        }
-                    },
-                    role: { type: Type.STRING, description: "A suitable job title for the candidate." },
-                    atsScore: { type: Type.NUMBER, description: "An estimated ATS-friendliness score out of 100." },
-                    experienceLevel: { type: Type.STRING, description: "Estimate the candidate's experience level (e.g., 'Entry-Level', 'Mid-Level', 'Senior', 'Executive')." },
-                    improvementSuggestions: { type: Type.STRING, description: "2-3 actionable bullet points ('*') on improving the resume." }
-                },
-                required: ["summary", "skills", "role", "atsScore", "experienceLevel", "improvementSuggestions"]
-            };
+            // BUG FIX: Removed obsolete 'analysisSchema'.
+            // The schema definition is now moved into the prompt.
+            const prompt = `Analyze this resume and return a JSON object with the following structure:
+{
+  "summary": "A concise two-sentence summary of the candidate's profile.",
+  "skills": [
+    {
+      "skillName": "Name of a key skill",
+      "prevalence": "Score from 1 (low) to 5 (high)."
+    }
+  ],
+  "role": "A suitable job title for the candidate.",
+  "atsScore": "An estimated ATS-friendliness score out of 100.",
+  "experienceLevel": "Estimate the candidate's experience level (e.g., 'Entry-Level', 'Mid-Level', 'Senior', 'Executive').",
+  "improvementSuggestions": "2-3 actionable bullet points ('*') on improving the resume."
+}
 
-            const response = await ai.models.generateContent({
+Here is the resume:
+---
+${resumeText}
+---
+`;
+
+            // BUG FIX: Updated to modern v1 SDK syntax
+            const model = ai.getGenerativeModel({
                 model: 'gemini-flash-latest',
-                contents: `Analyze this resume: \n\n${resumeText}`,
-                config: { responseMimeType: "application/json", responseSchema: analysisSchema },
+                // BUG FIX: 'responseMimeType' is set in 'generationConfig'
+                generationConfig: { responseMimeType: "application/json" },
             });
 
-            const resultJson = JSON.parse(response.text) as AnalysisResult;
+            const result = await model.generateContent(prompt);
+            const response = result.response;
+            // BUG FIX: Get text from 'response.text()'
+            const resultJson = JSON.parse(response.text()) as AnalysisResult;
+            
             setAnalysisResult(resultJson);
             setExperienceLevel(resultJson.experienceLevel);
             setStep('analysis_result');
@@ -495,14 +507,18 @@ const App = () => {
 
         try {
             const prompt = generateJobSearchPrompt();
-            const response = await ai.models.generateContent({
+
+            // BUG FIX: Updated to modern v1 SDK syntax
+            const model = ai.getGenerativeModel({
                 model: 'gemini-flash-latest',
-                contents: prompt,
-                config: { tools: [{ googleSearch: {} }] },
+                tools: [{ googleSearch: {} }],
             });
 
-            const text = response.text;
-
+            const result = await model.generateContent(prompt);
+            const response = result.response;
+            // BUG FIX: Get text from 'response.text()'
+            const text = response.text();
+            
             const jsonBlockMatch = text.match(/```json\n([\s\S]*?)\n```/);
             if (!jsonBlockMatch || !jsonBlockMatch[1]) {
                 throw new Error("AI response did not contain a valid JSON job list.");
@@ -529,13 +545,18 @@ const App = () => {
 
         try {
             const prompt = generateJobSearchPrompt(true);
-            const response = await ai.models.generateContent({
+
+            // BUG FIX: Updated to modern v1 SDK syntax
+            const model = ai.getGenerativeModel({
                 model: 'gemini-flash-latest',
-                contents: prompt,
-                config: { tools: [{ googleSearch: {} }] },
+                tools: [{ googleSearch: {} }],
             });
 
-            const text = response.text;
+            const result = await model.generateContent(prompt);
+            const response = result.response;
+            // BUG FIX: Get text from 'response.text()'
+            const text = response.text();
+
             const jsonBlockMatch = text.match(/```json\n([\s\S]*?)\n```/);
             if (!jsonBlockMatch || !jsonBlockMatch[1]) {
                 throw new Error("AI response did not contain a valid JSON job list.");
