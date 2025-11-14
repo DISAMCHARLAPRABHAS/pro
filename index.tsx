@@ -1,11 +1,4 @@
 
-
-
-
-
-
-
-
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -13,12 +6,7 @@ import { marked } from 'marked';
 import { Chart, BarController, BarElement, CategoryScale, LinearScale, Tooltip, Legend } from 'chart.js';
 import mammoth from 'mammoth';
 import * as pdfjsLib from 'pdfjs-dist';
-import { auth, db, firebaseInitialized, firebaseError } from './firebase';
-// Fix: Correctly import the namespaced firebase object for v8 compatibility.
-// FIX: Use a namespace import for Firebase v8 to ensure types are resolved correctly.
-import * as firebase from 'firebase/app';
-import 'firebase/auth';
-import 'firebase/firestore';
+import { auth, db, firebaseInitialized, firebase } from './firebase';
 
 
 // Configure PDF.js worker
@@ -40,6 +28,7 @@ interface AnalysisResult {
     role: string;
     atsScore: number;
     improvementSuggestions: string;
+    experienceLevel: string;
 }
 
 interface Job {
@@ -49,18 +38,99 @@ interface Job {
     location: string;
     applyLink: string;
     datePosted?: string;
+    sourceUrl?: string;
 }
 
 interface JobResult {
     jobs: Job[];
-    sources: any[];
 }
 
-interface AnalysisHistoryItem extends AnalysisResult {
-    id: string;
-    createdAt: Date;
+const defaultUserProfile = {
+    preferredTitles: '',
+    minSalary: '',
+    maxSalary: '',
+    careerGoals: '',
+    locationPreference: '',
+};
+
+interface UserProfile {
+    preferredTitles: string;
+    minSalary: string;
+    maxSalary: string;
+    careerGoals: string;
+    locationPreference: string;
 }
 
+const PDFPreview = ({ file }: { file: ArrayBuffer | null }) => {
+    const containerRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        const container = containerRef.current;
+        if (!file || !container) return;
+
+        container.innerHTML = ''; // Clear previous renders
+
+        const renderPdf = async () => {
+            try {
+                // Use a copy of the buffer as pdfjs might transfer it
+                const pdf = await pdfjsLib.getDocument(file.slice(0)).promise;
+                for (let i = 1; i <= pdf.numPages; i++) {
+                    const page = await pdf.getPage(i);
+                    // Adjust scale for better resolution
+                    const scale = window.devicePixelRatio || 1.5;
+                    const viewport = page.getViewport({ scale });
+
+                    const canvas = document.createElement('canvas');
+                    canvas.style.display = 'block';
+                    if (i < pdf.numPages) {
+                        canvas.style.marginBottom = '1rem';
+                    }
+
+                    const context = canvas.getContext('2d');
+                    if (!context) continue;
+
+                    canvas.height = viewport.height;
+                    canvas.width = viewport.width;
+
+                    // FIX: The TypeScript error indicates that the 'canvas' property is required
+                    // in the RenderParameters object for pdfjs-dist. This is likely due to a
+                    // mismatch in the project's type definitions. Adding the property to satisfy the compiler.
+                    const renderContext = {
+                        canvasContext: context,
+                        viewport: viewport,
+                    };
+                    await page.render(renderContext).promise;
+                    container.appendChild(canvas);
+                }
+            } catch (error) {
+                console.error("Error rendering PDF:", error);
+                container.innerHTML = `<div class="error-message">Failed to render PDF preview. The file might be corrupted or in an unsupported format.</div>`;
+            }
+        };
+
+        renderPdf();
+
+    }, [file]);
+
+    return <div ref={containerRef} className="pdf-preview-wrapper"></div>;
+};
+
+const PreviewRenderer = ({ content, type }: { content: string | ArrayBuffer | null; type: 'html' | 'pdf' | 'text' | null }) => {
+    if (content === null) {
+        return <div className="preview-placeholder card"><p>No preview available.</p></div>;
+    }
+
+    switch (type) {
+        case 'html':
+            return <div className="html-preview" dangerouslySetInnerHTML={{ __html: content as string }} />;
+        case 'text':
+            return <pre className="text-preview">{content as string}</pre>;
+        case 'pdf':
+            return <PDFPreview file={content as ArrayBuffer} />;
+        default:
+            return <div className="preview-placeholder card"><p>Unsupported file type for preview.</p></div>;
+    }
+};
 
 const SkillsChart = ({ skills }: { skills: Skill[] }) => {
     const chartRef = useRef<HTMLCanvasElement>(null);
@@ -74,7 +144,7 @@ const SkillsChart = ({ skills }: { skills: Skill[] }) => {
 
             const ctx = chartRef.current.getContext('2d');
             if (!ctx) return;
-            
+
             const sortedSkills = [...skills].sort((a, b) => a.prevalence - b.prevalence);
             const skillLabels = sortedSkills.map(s => s.skillName);
             const prevalenceData = sortedSkills.map(s => s.prevalence);
@@ -86,9 +156,10 @@ const SkillsChart = ({ skills }: { skills: Skill[] }) => {
                     datasets: [{
                         label: 'Skill Prevalence (1-5)',
                         data: prevalenceData,
-                        backgroundColor: 'rgba(66, 133, 244, 0.7)',
-                        borderColor: 'rgba(66, 133, 244, 1)',
-                        borderWidth: 1
+                        backgroundColor: '#4ade80',
+                        borderColor: '#1f2937',
+                        borderWidth: 2,
+                        borderRadius: 4
                     }]
                 },
                 options: {
@@ -128,214 +199,171 @@ const SkillsChart = ({ skills }: { skills: Skill[] }) => {
     );
 };
 
-const AuthScreen = ({ onGoogleSignIn }: { onGoogleSignIn: () => void }) => {
-    const [isSignUp, setIsSignUp] = useState(false);
-    const [email, setEmail] = useState('');
-    const [password, setPassword] = useState('');
-    const [error, setError] = useState('');
+interface JobCardProps {
+    job: Job;
+    isSaved: boolean;
+    onToggleSave: () => void;
+    cardIndex: number;
+}
 
-    const handleEmailAuth = async (e: React.FormEvent) => {
-        e.preventDefault();
-        setError('');
-        if (!auth) {
-            setError("Authentication service is not available.");
-            return;
-        }
+const JobCard: React.FC<JobCardProps> = ({ job, isSaved, onToggleSave, cardIndex }) => {
+    let sourceHostname = null;
+    const sourceUrl = job.sourceUrl || job.applyLink;
+    try { sourceHostname = new URL(String(sourceUrl)).hostname.replace(/^www\./, ''); } catch (e) { }
 
-        try {
-            if (isSignUp) {
-                // Fix: Use v8 namespaced API for createUserWithEmailAndPassword
-                await auth.createUserWithEmailAndPassword(email, password);
-            } else {
-                // Fix: Use v8 namespaced API for signInWithEmailAndPassword
-                await auth.signInWithEmailAndPassword(email, password);
-            }
-            // onAuthStateChanged in the main App component will handle successful login
-        } catch (err: any) {
-            let friendlyError = 'An unknown error occurred.';
-            if (err.code) {
-                switch (err.code) {
-                    case 'auth/email-already-in-use':
-                        friendlyError = 'This email address is already registered. Please sign in.';
-                        break;
-                    case 'auth/invalid-email':
-                        friendlyError = 'Please enter a valid email address.';
-                        break;
-                    case 'auth/weak-password':
-                        friendlyError = 'Password should be at least 6 characters long.';
-                        break;
-                    case 'auth/user-not-found':
-                    case 'auth/wrong-password':
-                    case 'auth/invalid-credential':
-                        friendlyError = 'Invalid email or password. Please try again.';
-                        break;
-                    default:
-                        friendlyError = `Authentication failed. Please try again. (${err.code})`;
-                }
-            }
-            setError(friendlyError);
-        }
-    };
+    const [isExpanded, setIsExpanded] = useState(false);
+    const TRUNCATE_LENGTH = 180;
+    const isLongDescription = job.description.length > TRUNCATE_LENGTH;
+
+    const descriptionText = isLongDescription && !isExpanded
+        ? `${job.description.substring(0, TRUNCATE_LENGTH)}...`
+        : job.description;
 
     return (
-        <div className="auth-screen">
-            <h2>{isSignUp ? 'Create an Account' : 'Welcome Back!'}</h2>
-            <p>{isSignUp ? 'Sign up to analyze your resume and find jobs.' : 'Sign in to access your dashboard.'}</p>
-            
-            {error && <div className="error-message" style={{textAlign: 'left', marginTop: 0, marginBottom: '1rem'}}>{error}</div>}
-
-            <form onSubmit={handleEmailAuth} className="auth-form">
-                <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    placeholder="Email Address"
-                    required
-                    className="form-input"
-                />
-                <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Password"
-                    required
-                    className="form-input"
-                />
-                <button type="submit" className="button button-primary" style={{width: '100%'}}>
-                    {isSignUp ? 'Sign Up' : 'Sign In'}
-                </button>
-            </form>
-
-            <p className="form-toggle">
-                {isSignUp ? 'Already have an account?' : "Don't have an account?"}
-                <button onClick={() => { setIsSignUp(!isSignUp); setError(''); }}>
-                    {isSignUp ? 'Sign In' : 'Sign Up'}
-                </button>
-            </p>
-
-            <div className="auth-divider">
-                <span>OR</span>
-            </div>
-
-            <button onClick={onGoogleSignIn} className="button button-secondary google-button">
-                <svg aria-hidden="true" width="18" height="18" viewBox="0 0 18 18"><path d="M16.51 8.1H9v3.08h4.34c-.17 1.03-.64 1.9-1.38 2.52v2.05h2.64C16.02 14.25 16.51 11.43 16.51 8.1Z" fill="#4285F4"></path><path d="M9 17c2.35 0 4.31-.78 5.75-2.12l-2.64-2.05c-.78.52-1.78.83-2.91.83-2.25 0-4.15-1.52-4.83-3.56H1.4v2.12C2.84 15.12 5.66 17 9 17Z" fill="#34A853"></path><path d="M4.17 10.33c-.17-.52-.26-1.07-.26-1.63s.09-1.11.26-1.63V4.95H1.4C.54 6.6.02 8.25.02 10s.52 3.4 1.38 5.05l2.79-2.12Z" fill="#FBBC05"></path><path d="M9 3.35c1.27 0 2.4.43 3.3 1.29l2.27-2.27C13.31.84 11.35 0 9 0 5.66 0 2.84 1.88 1.4 4.95l2.77 2.12C4.85 4.87 6.75 3.35 9 3.35Z" fill="#EA4335"></path></svg>
-                <span>Sign in with Google</span>
+        <div className="job-card card" style={{ '--card-index': cardIndex } as React.CSSProperties}>
+            <button className={`save-job-button ${isSaved ? 'saved' : ''}`} onClick={onToggleSave} aria-label={isSaved ? 'Unsave job' : 'Save job'}>
+                <span className="material-icons">{isSaved ? 'bookmark' : 'bookmark_border'}</span>
             </button>
+            <h3>{job.title}</h3>
+            <div className="job-card-meta">
+                <p className="company">{job.company} - {job.location}</p>
+                {job.datePosted && <p className="job-date">{job.datePosted}</p>}
+            </div>
+            {sourceHostname && <p className="job-source">Source: <a href={sourceUrl} target="_blank" rel="noopener noreferrer">{sourceHostname}</a></p>}
+            <div className="description-container">
+                <p className="description">{descriptionText}</p>
+                {isLongDescription && (
+                    <button className="read-more-button" onClick={() => setIsExpanded(!isExpanded)}>
+                        {isExpanded ? 'Read Less' : 'Read More'}
+                    </button>
+                )}
+            </div>
+            <a href={job.applyLink} target="_blank" rel="noopener noreferrer" className="button button-primary">
+                Apply Now
+                <span className="material-icons button-external-icon">open_in_new</span>
+            </a>
         </div>
     );
 };
 
+const JobCardSkeleton = () => (
+    <div className="job-card-skeleton card">
+        <div className="skeleton-line title"></div>
+        <div className="skeleton-line meta"></div>
+        <div className="skeleton-line description"></div>
+        <div className="skeleton-line description short"></div>
+        <div className="skeleton-line button"></div>
+    </div>
+);
+
 
 const App = () => {
-    // Fix: Use firebase.User type for v8 compatibility
-    const [user, setUser] = useState<firebase.User | null>(null);
-    const [authLoading, setAuthLoading] = useState(true);
     const [step, setStep] = useState<AppStep>('input');
     const [resumeText, setResumeText] = useState('');
     const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
     const [jobsResult, setJobsResult] = useState<JobResult | null>(null);
-    const [analysisHistory, setAnalysisHistory] = useState<AnalysisHistoryItem[]>([]);
-    const [error, setError] = useState<string | null>(firebaseError);
+    const [error, setError] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [jobSortOrder, setJobSortOrder] = useState('relevance');
+    const [locationFilter, setLocationFilter] = useState('');
+    const [experienceLevel, setExperienceLevel] = useState('');
+    const [preferredCompanies, setPreferredCompanies] = useState('');
+    const [savedJobs, setSavedJobs] = useState<Job[]>([]);
+    const [userProfile, setUserProfile] = useState<UserProfile>(defaultUserProfile);
+    const [profileSaved, setProfileSaved] = useState(false);
+    const [isFindingMoreJobs, setIsFindingMoreJobs] = useState(false);
+    const [user, setUser] = useState<firebase.User | null>(null);
+
+    // Resume preview state
+    const [activeTab, setActiveTab] = useState<'text' | 'preview'>('text');
+    const [previewContent, setPreviewContent] = useState<string | ArrayBuffer | null>(null);
+    const [previewType, setPreviewType] = useState<'html' | 'pdf' | 'text' | null>(null);
+    const [isGeneratingPreview, setIsGeneratingPreview] = useState(false);
+    const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
 
     const ai = useMemo(() => new GoogleGenAI({ apiKey: process.env.API_KEY as string }), []);
 
-    // --- Authentication ---
     useEffect(() => {
-        if (!firebaseInitialized || !auth) {
-            setAuthLoading(false);
-            return;
-        }
-        // Fix: Use v8 namespaced API for onAuthStateChanged
-        const unsubscribe = auth.onAuthStateChanged(async (currentUser) => {
-            if (currentUser) {
-                setUser(currentUser);
-                await fetchAnalysisHistory(currentUser.uid);
+        if (!firebaseInitialized || !auth) return;
+
+        const unsubscribe = auth.onAuthStateChanged(async (user) => {
+            setUser(user);
+            if (user && db) {
+                // User is signed in, fetch data from Firestore
+                const userDocRef = db.collection('users').doc(user.uid);
+                try {
+                    const doc = await userDocRef.get();
+                    if (doc.exists) {
+                        const data = doc.data();
+                        setSavedJobs(data?.savedJobs || []);
+                        setUserProfile(data?.userProfile || defaultUserProfile);
+                    } else {
+                        // New user, create a document
+                        await userDocRef.set({ savedJobs: [], userProfile: defaultUserProfile });
+                    }
+                } catch (e) {
+                    console.error("Error fetching user data from Firestore:", e);
+                    setError("Could not load your profile data.");
+                }
             } else {
-                setUser(null);
-                // Reset state on logout
-                setAnalysisHistory([]);
-                handleStartOver();
+                // User is signed out, clear data
+                setSavedJobs([]);
+                setUserProfile(defaultUserProfile);
             }
-            setAuthLoading(false);
         });
+
         return () => unsubscribe();
-    }, []);
+    }, [firebaseInitialized]);
 
-    const handleGoogleSignIn = async () => {
-        if (!firebaseInitialized || !auth) return;
-        // Fix: Use v8 namespaced API for GoogleAuthProvider
-        const provider = new firebase.auth.GoogleAuthProvider();
-        try {
-            // Fix: Use v8 namespaced API for signInWithPopup
-            await auth.signInWithPopup(provider);
-        } catch (error) {
-            console.error("Authentication error:", error);
-            setError("Failed to sign in. Please try again.");
-        }
-    };
-
-    const handleSignOut = async () => {
-        if (!firebaseInitialized || !auth) return;
-        try {
-            // Fix: Use v8 namespaced API for signOut
-            await auth.signOut();
-        } catch (error) {
-            console.error("Sign out error:", error);
-        }
-    };
-
-    // --- Data Handling ---
-    const fetchAnalysisHistory = async (uid: string) => {
-        if (!firebaseInitialized || !db) return;
-        try {
-            // Fix: Use v8 namespaced API for Firestore queries
-            const q = db.collection("analyses")
-                .where("userId", "==", uid)
-                .orderBy("createdAt", "desc");
-            const querySnapshot = await q.get();
-            const history: AnalysisHistoryItem[] = [];
-            querySnapshot.forEach((doc) => {
-                const data = doc.data();
-                history.push({
-                    id: doc.id,
-                    ...data as AnalysisResult,
-                    // Fix: Use v8 namespaced Timestamp type
-                    createdAt: (data.createdAt as firebase.firestore.Timestamp).toDate()
-                });
-            });
-            setAnalysisHistory(history);
-        } catch (e) {
-            console.error("Error fetching history: ", e);
-            setError("Could not load your analysis history.");
-        }
-    };
 
     const handleUploadClick = () => {
         fileInputRef.current?.click();
+    };
+    
+    const clearFile = () => {
+        setResumeText('');
+        setPreviewContent(null);
+        setPreviewType(null);
+        setUploadedFileName(null);
+        if (fileInputRef.current) {
+            fileInputRef.current.value = '';
+        }
     };
 
     const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
         const file = event.target.files?.[0];
         if (!file) return;
 
-        setError(firebaseError);
+        setError(null);
         setResumeText('');
+        setPreviewContent(null);
+        setPreviewType(null);
+        setActiveTab('text');
+        setIsGeneratingPreview(true);
+        setUploadedFileName(file.name);
 
         try {
             const extension = file.name.split('.').pop()?.toLowerCase();
             let text = '';
+            const arrayBuffer = await file.arrayBuffer();
 
             if (extension === 'txt' || extension === 'md') {
-                text = await file.text();
+                text = await new Blob([arrayBuffer]).text();
+                if (extension === 'md') {
+                    setPreviewContent(await marked(text));
+                    setPreviewType('html');
+                } else {
+                    setPreviewContent(text);
+                    setPreviewType('text');
+                }
             } else if (extension === 'docx') {
-                const arrayBuffer = await file.arrayBuffer();
-                const result = await mammoth.extractRawText({ arrayBuffer });
-                text = result.value;
+                const resultText = await mammoth.extractRawText({ arrayBuffer });
+                text = resultText.value;
+                const resultHtml = await mammoth.convertToHtml({ arrayBuffer });
+                setPreviewContent(resultHtml.value);
+                setPreviewType('html');
             } else if (extension === 'pdf') {
-                const arrayBuffer = await file.arrayBuffer();
-                const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
+                const pdf = await pdfjsLib.getDocument(arrayBuffer.slice(0)).promise;
                 let fullText = '';
                 for (let i = 1; i <= pdf.numPages; i++) {
                     const page = await pdf.getPage(i);
@@ -344,31 +372,32 @@ const App = () => {
                     fullText += pageText + '\n';
                 }
                 text = fullText;
+                setPreviewContent(arrayBuffer);
+                setPreviewType('pdf');
             } else {
                 throw new Error('Unsupported file type. Please upload a .txt, .md, .pdf, or .docx file.');
             }
 
             setResumeText(text);
+            setActiveTab('preview');
 
         } catch (e) {
             console.error('Error reading file:', e);
             const message = e instanceof Error ? e.message : 'Failed to read the file. Please try another file.';
             setError(message);
+            setUploadedFileName(null);
         } finally {
-            event.target.value = '';
+            setIsGeneratingPreview(false);
+            if (event.target) event.target.value = '';
         }
     };
 
 
     const handleAnalyze = async () => {
         if (!resumeText.trim()) return;
-        if (firebaseInitialized && !user) {
-            setError("Please sign in to analyze and save your results.");
-            return;
-        }
-        
+
         setStep('analyzing');
-        setError(firebaseError);
+        setError(null);
         setAnalysisResult(null);
 
         try {
@@ -386,9 +415,10 @@ const App = () => {
                     },
                     role: { type: Type.STRING, description: "A suitable job title for the candidate." },
                     atsScore: { type: Type.NUMBER, description: "An estimated ATS-friendliness score out of 100." },
+                    experienceLevel: { type: Type.STRING, description: "Estimate the candidate's experience level (e.g., 'Entry-Level', 'Mid-Level', 'Senior', 'Executive')." },
                     improvementSuggestions: { type: Type.STRING, description: "2-3 actionable bullet points ('*') on improving the resume." }
                 },
-                required: ["summary", "skills", "role", "atsScore", "improvementSuggestions"]
+                required: ["summary", "skills", "role", "atsScore", "experienceLevel", "improvementSuggestions"]
             };
 
             const response = await ai.models.generateContent({
@@ -396,306 +426,435 @@ const App = () => {
                 contents: `Analyze this resume: \n\n${resumeText}`,
                 config: { responseMimeType: "application/json", responseSchema: analysisSchema },
             });
-            
+
             const resultJson = JSON.parse(response.text) as AnalysisResult;
             setAnalysisResult(resultJson);
+            setExperienceLevel(resultJson.experienceLevel);
             setStep('analysis_result');
-            
-            // Save to Firestore
-            if (firebaseInitialized && user && db) {
-                // Fix: Use v8 namespaced API to add a document
-                await db.collection("analyses").add({
-                    ...resultJson,
-                    userId: user.uid,
-                    createdAt: new Date(),
-                });
-                await fetchAnalysisHistory(user.uid); // Refresh history
-            }
+
         } catch (e: any) {
             console.error('Analysis Error:', e);
             const analysisError = `Analysis failed: ${e.message}.`;
-            setError(firebaseError ? `${firebaseError}\n${analysisError}` : analysisError);
+            setError(analysisError);
             setStep('input');
         }
+    };
+
+    const generateJobSearchPrompt = (findMore = false) => {
+        if (!analysisResult) return '';
+
+        let profilePromptSection = '';
+        const hasProfile = userProfile.preferredTitles || userProfile.minSalary || userProfile.maxSalary || userProfile.careerGoals || userProfile.locationPreference;
+        if (hasProfile) {
+            const minSal = userProfile.minSalary ? `₹${Number(userProfile.minSalary).toLocaleString('en-IN')}` : '';
+            const maxSal = userProfile.maxSalary ? `₹${Number(userProfile.maxSalary).toLocaleString('en-IN')}` : '';
+            const salaryRange = [minSal, maxSal].filter(Boolean).join(' - ');
+
+            profilePromptSection = `
+            
+            Candidate's Career Profile for Personalization:
+            - Preferred Job Titles: ${userProfile.preferredTitles || 'Not specified'}
+            - Preferred Locations: ${userProfile.locationPreference || 'Not specified'}
+            - Desired Annual Salary Range (INR): ${salaryRange || 'Not specified'}
+            - Career Goals: ${userProfile.careerGoals || 'Not specified'}
+
+            Use this profile to further refine the job search. Prioritize roles matching the preferred titles and locations. Consider the salary range and career goals when evaluating relevance.
+            `;
+        }
+
+        let existingJobsSection = '';
+        if (findMore && jobsResult && jobsResult.jobs.length > 0) {
+            const existingJobTitles = jobsResult.jobs.map(job => `- ${job.title} at ${job.company}`).join('\n');
+            existingJobsSection = `
+            
+            IMPORTANT: You have already shown the user the following jobs. Provide a list of NEW jobs that are NOT in the list below:
+            ${existingJobTitles}
+            `;
+        }
+
+        return `Based on this resume analysis, find at least 20 relevant and recent job openings in India.
+        Analysis:
+        - Ideal Role: ${analysisResult.role}
+        - Key Skills: ${analysisResult.skills.map(s => s.skillName).join(', ')}
+        - Candidate Summary: ${analysisResult.summary}
+        
+        Job Search Preferences:
+        - Experience Level: ${experienceLevel}
+        - Preferred Companies: ${preferredCompanies.trim() ? preferredCompanies.trim() : 'Any'}
+        ${profilePromptSection}
+        Prioritize jobs that closely match the specified experience level and ideal role. If preferred companies are listed, heavily weigh results from those companies, but also include other relevant opportunities. Use the key skills and summary for keyword matching.
+        ${existingJobsSection}
+        IMPORTANT: Return a JSON object inside a markdown block (\`\`\`json ... \`\`\`). The JSON object must have one key "jobs", an array of objects. Each object must have keys: "title", "company", "location", "description" (1-2 sentences), "applyLink" (a direct URL to the application page), "sourceUrl" (the URL of the page where the job was found), and "datePosted" (the estimated posting date in "YYYY-MM-DD" format).`;
     };
 
     const handleFindJobs = async () => {
         if (!analysisResult) return;
         setStep('finding_jobs');
-        setError(firebaseError);
+        setError(null);
         setJobsResult(null);
 
         try {
-            const prompt = `Based on this resume analysis, find at least 20 relevant and recent job openings in India.
-            Analysis:
-            - Ideal Role: ${analysisResult.role}
-            - Key Skills: ${analysisResult.skills.map(s => s.skillName).join(', ')}
-            IMPORTANT: Return a JSON object inside a markdown block (\`\`\`json ... \`\`\`). The JSON object must have one key "jobs", an array of objects. Each object must have keys: "title", "company", "location", "description" (1-2 sentences), "applyLink" (a direct URL), and "datePosted" (the estimated posting date in "YYYY-MM-DD" format).`;
-
+            const prompt = generateJobSearchPrompt();
             const response = await ai.models.generateContent({
                 model: 'gemini-flash-latest',
                 contents: prompt,
                 config: { tools: [{ googleSearch: {} }] },
             });
-            
-            const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+
             const text = response.text;
-            
+
             const jsonBlockMatch = text.match(/```json\n([\s\S]*?)\n```/);
             if (!jsonBlockMatch || !jsonBlockMatch[1]) {
                 throw new Error("AI response did not contain a valid JSON job list.");
             }
 
             const jsonString = jsonBlockMatch[1];
-            const resultJson = JSON.parse(jsonString);
+            const resultJson = JSON.parse(jsonString) as JobResult;
 
-            setJobsResult({ jobs: resultJson.jobs || [], sources: groundingChunks });
+            setJobsResult({ jobs: resultJson.jobs || [] });
             setStep('jobs_result');
 
         } catch (e: any) {
             console.error('Job Search Error:', e);
             const jobError = `Job search failed: ${e.message}.`;
-            setError(firebaseError ? `${firebaseError}\n${jobError}` : jobError);
+            setError(jobError);
             setStep('analysis_result');
         }
     };
+
+    const handleFindMoreJobs = async () => {
+        if (!analysisResult) return;
+        setIsFindingMoreJobs(true);
+        setError(null);
+
+        try {
+            const prompt = generateJobSearchPrompt(true);
+            const response = await ai.models.generateContent({
+                model: 'gemini-flash-latest',
+                contents: prompt,
+                config: { tools: [{ googleSearch: {} }] },
+            });
+
+            const text = response.text;
+            const jsonBlockMatch = text.match(/```json\n([\s\S]*?)\n```/);
+            if (!jsonBlockMatch || !jsonBlockMatch[1]) {
+                throw new Error("AI response did not contain a valid JSON job list.");
+            }
+            const jsonString = jsonBlockMatch[1];
+            const resultJson = JSON.parse(jsonString) as JobResult;
+            const newJobs = resultJson.jobs || [];
+
+            if (newJobs.length > 0) {
+                setJobsResult(prev => ({
+                    jobs: [...(prev?.jobs || []), ...newJobs]
+                }));
+            }
+        } catch (e: any) {
+            console.error('Find More Jobs Error:', e);
+            const findMoreError = `Finding more jobs failed: ${e.message}.`;
+            setError(findMoreError);
+        } finally {
+            setIsFindingMoreJobs(false);
+        }
+    };
     
-    const handleHistoryItemClick = (item: AnalysisHistoryItem) => {
-        setAnalysisResult(item);
-        setStep('analysis_result');
-        setJobsResult(null); // Clear previous job results
-        setError(firebaseError);
+    const handleProfileChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+        const { name, value } = e.target;
+        setUserProfile(prev => ({ ...prev, [name]: value }));
     };
 
-    const handleStartOver = () => {
-        setStep('input');
-        setResumeText('');
-        setAnalysisResult(null);
-        setJobsResult(null);
-        setError(firebaseError);
+    const handleSaveProfile = async () => {
+        if (!user || !db) {
+            setError("You must be signed in to save your profile.");
+            return;
+        }
+        try {
+            await db.collection('users').doc(user.uid).set({ userProfile }, { merge: true });
+            setProfileSaved(true);
+            setTimeout(() => setProfileSaved(false), 2000); // Hide message after 2s
+        } catch (e) {
+            console.error("Error saving profile:", e);
+            setError("Failed to save profile. Please try again.");
+        }
     };
 
-    const isLoading = step === 'analyzing' || step === 'finding_jobs' || (authLoading && firebaseInitialized);
-    
-    const sortedJobs = useMemo(() => {
-        if (!jobsResult?.jobs) return [];
-        
-        const jobsToSort = [...jobsResult.jobs];
-        if (jobSortOrder === 'relevance') {
-            return jobsToSort;
+
+    const toggleSaveJob = (jobToToggle: Job) => {
+        if (!user) {
+            setError("Please sign in to save jobs.");
+            // Optionally, trigger sign-in flow
+            return;
         }
 
-        jobsToSort.sort((a, b) => {
-            const dateA = a.datePosted ? new Date(a.datePosted).getTime() : 0;
-            const dateB = b.datePosted ? new Date(b.datePosted).getTime() : 0;
+        let updatedSavedJobs;
+        if (savedJobs.some(job => job.applyLink === jobToToggle.applyLink)) {
+            updatedSavedJobs = savedJobs.filter(job => job.applyLink !== jobToToggle.applyLink);
+        } else {
+            updatedSavedJobs = [...savedJobs, jobToToggle];
+        }
+        setSavedJobs(updatedSavedJobs);
 
-            // Jobs without dates go to the bottom
-            if (dateA === 0 && dateB !== 0) return 1;
-            if (dateB === 0 && dateA !== 0) return -1;
-            
-            if (jobSortOrder === 'newest') {
-                return dateB - dateA;
-            }
-            if (jobSortOrder === 'oldest') {
-                return dateA - dateB;
-            }
-            return 0;
-        });
-        
-        return jobsToSort;
-    }, [jobsResult, jobSortOrder]);
+        if (db && user) {
+            db.collection('users').doc(user.uid).set({ savedJobs: updatedSavedJobs }, { merge: true })
+                .catch(e => {
+                    console.error("Error saving job to Firestore:", e);
+                    setError("Could not save job. Please try again.");
+                    // Revert state on error
+                    setSavedJobs(savedJobs);
+                });
+        }
+    };
     
-    const getScoreColor = (score: number) => {
-        if (score >= 85) return 'var(--success-color)';
-        if (score >= 70) return 'var(--warning-color)';
-        return 'var(--danger-color)';
+    const sortedAndFilteredJobs = useMemo(() => {
+        if (!jobsResult?.jobs) return [];
+        let jobs = [...jobsResult.jobs];
+
+        // Filter by location
+        if (locationFilter.trim()) {
+            jobs = jobs.filter(job => job.location.toLowerCase().includes(locationFilter.toLowerCase()));
+        }
+
+        // Sort
+        if (jobSortOrder === 'date') {
+            jobs.sort((a, b) => {
+                const dateA = a.datePosted ? new Date(a.datePosted).getTime() : 0;
+                const dateB = b.datePosted ? new Date(b.datePosted).getTime() : 0;
+                return dateB - dateA;
+            });
+        }
+        // 'relevance' is default and doesn't require sorting as it comes from the API that way
+
+        return jobs;
+    }, [jobsResult, locationFilter, jobSortOrder]);
+
+    const handleSignIn = async () => {
+        if (!auth || !firebase) return;
+        const provider = new firebase.auth.GoogleAuthProvider();
+        try {
+            await auth.signInWithPopup(provider);
+        } catch (error) {
+            console.error("Authentication error:", error);
+            setError("Failed to sign in. Please try again.");
+        }
     };
 
-    const renderAuth = () => {
-        if (!firebaseInitialized) return null;
-        return (
-            <div className="auth-container">
-                {authLoading ? (
-                    <div className="spinner" style={{width: '20px', height: '20px'}}></div>
-                ) : user ? (
-                    <div className="user-info">
-                        {user.photoURL ? (
-                             <img src={user.photoURL} alt={user.displayName || 'User avatar'} />
-                        ) : (
-                            <span className="material-icons user-icon">account_circle</span>
-                        )}
-                        <span>{user.displayName || user.email}</span>
-                        <button onClick={handleSignOut} className="button button-secondary button-auth">Sign Out</button>
+    const handleSignOut = async () => {
+        if (!auth) return;
+        try {
+            await auth.signOut();
+        } catch (error) {
+            console.error("Sign out error:", error);
+            setError("Failed to sign out.");
+        }
+    };
+
+
+    const renderContent = () => {
+        switch (step) {
+            case 'analyzing':
+            case 'finding_jobs':
+                return (
+                    <div className="loader card">
+                        <div className="spinner"></div>
+                        <p>{step === 'analyzing' ? 'Analyzing your resume...' : 'Finding job opportunities...'}</p>
                     </div>
-                ) : null}
-            </div>
-        );
-    }
+                );
+            case 'analysis_result':
+                return analysisResult && (
+                    <div className="analysis-results">
+                        {/* Summary and Role */}
+                        <div className="results-card card">
+                             <h3>AI Summary</h3>
+                             <p>{analysisResult.summary}</p>
+                             <p>Suggested Role: <strong className="role-suggestion">{analysisResult.role}</strong></p>
+                        </div>
+                        {/* Skills and ATS */}
+                         <div className="analysis-grid">
+                            <div className="results-card card">
+                                <h3>Top Skills Analysis</h3>
+                                <SkillsChart skills={analysisResult.skills} />
+                            </div>
+                            <div className="results-card card" style={{textAlign: 'center'}}>
+                                <h3>ATS Score</h3>
+                                <div className="ats-score-circle" style={{ background: `conic-gradient(var(--primary-color) ${analysisResult.atsScore * 3.6}deg, #e5e7eb 0deg)` }}>
+                                    {analysisResult.atsScore}
+                                </div>
+                                <p>An estimate of your resume's compatibility with automated screening systems.</p>
+                            </div>
+                        </div>
+                        {/* Suggestions */}
+                        <div className="results-card card">
+                            <h3>Improvement Suggestions</h3>
+                            <div dangerouslySetInnerHTML={{ __html: marked.parse(analysisResult.improvementSuggestions) }}></div>
+                        </div>
+                        
+                        {/* Career Profile Section */}
+                        <div className="profile-section card">
+                            <details open>
+                                <summary>
+                                    My Career Profile
+                                    <span className="summary-icon material-icons">expand_more</span>
+                                </summary>
+                                <div className="profile-form">
+                                    <p className="form-description">Personalize your job search. This information will be used by the AI to find better matches for you.</p>
+
+                                    <div className="form-grid">
+                                        <div className="form-group">
+                                            <label htmlFor="preferredTitles">Preferred Job Titles</label>
+                                            <input type="text" id="preferredTitles" name="preferredTitles" value={userProfile.preferredTitles} onChange={handleProfileChange} placeholder="e.g., Senior Software Engineer" />
+                                        </div>
+                                        <div className="form-group">
+                                            <label htmlFor="locationPreference">Preferred Location(s)</label>
+                                            <input type="text" id="locationPreference" name="locationPreference" value={userProfile.locationPreference} onChange={handleProfileChange} placeholder="e.g., Bangalore, Remote" />
+                                        </div>
+                                    </div>
+
+                                    <div className="form-group">
+                                        <label>Desired Annual Salary (INR)</label>
+                                        <div className="salary-inputs">
+                                            <input type="number" name="minSalary" value={userProfile.minSalary} onChange={handleProfileChange} placeholder="₹ Minimum" aria-label="Minimum salary" />
+                                            <span>-</span>
+                                            <input type="number" name="maxSalary" value={userProfile.maxSalary} onChange={handleProfileChange} placeholder="₹ Maximum" aria-label="Maximum salary" />
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="form-group" style={{marginTop: '1.5rem'}}>
+                                        <label htmlFor="careerGoals">Career Goals</label>
+                                        <textarea id="careerGoals" name="careerGoals" value={userProfile.careerGoals} onChange={handleProfileChange} rows={3} placeholder="e.g., Transition into a leadership role..."></textarea>
+                                    </div>
+                                    
+                                    <div className="button-group profile-actions">
+                                        <button onClick={handleSaveProfile} className="button button-secondary" disabled={!user}>
+                                            <span className="material-icons">{profileSaved ? 'check_circle' : 'save'}</span>
+                                            {profileSaved ? 'Saved!' : 'Save Profile'}
+                                        </button>
+                                        {!user && <p className="sign-in-prompt">Sign in to save your profile.</p>}
+                                    </div>
+                                </div>
+                            </details>
+                        </div>
+
+                        <div className="button-group">
+                            <button onClick={handleFindJobs} className="button button-primary">Find Jobs for Me</button>
+                        </div>
+                    </div>
+                );
+            case 'jobs_result':
+                 return jobsResult && (
+                    <div className="results-section">
+                        <h2>Your Curated Job Openings</h2>
+                        <div className="job-listings">
+                            {sortedAndFilteredJobs.map((job, index) => (
+                                <JobCard
+                                    key={`${job.applyLink}-${index}`}
+                                    job={job}
+                                    cardIndex={index}
+                                    isSaved={savedJobs.some(saved => saved.applyLink === job.applyLink)}
+                                    onToggleSave={() => toggleSaveJob(job)}
+                                />
+                            ))}
+                        </div>
+                        <div className="button-group">
+                             <button onClick={handleFindMoreJobs} className="button button-secondary" disabled={isFindingMoreJobs}>
+                                {isFindingMoreJobs ? 'Searching...' : 'Find More Jobs'}
+                            </button>
+                        </div>
+                    </div>
+                 );
+            case 'input':
+            default:
+                return (
+                    <>
+                        <section className="hero-section">
+                            <h1>Unlock Your Career Potential</h1>
+                            <p>Upload your resume, and our AI will analyze your skills, suggest improvements, and find the perfect job matches for you in India.</p>
+                        </section>
+                        <div className="card">
+                            {uploadedFileName ? (
+                                <div className="file-preview-card">
+                                    <div className="file-info-bar">
+                                        <div className="file-name">
+                                            <span className="material-icons">description</span>
+                                            <span>{uploadedFileName}</span>
+                                        </div>
+                                        <div className="tabs">
+                                            <button className={`tab-button ${activeTab === 'text' ? 'active' : ''}`} onClick={() => setActiveTab('text')}>Raw Text</button>
+                                            <button className={`tab-button ${activeTab === 'preview' ? 'active' : ''}`} onClick={() => setActiveTab('preview')}>Preview</button>
+                                        </div>
+                                        <button onClick={clearFile} className="clear-file-button" aria-label="Clear file">
+                                            <span className="material-icons">close</span>
+                                        </button>
+                                    </div>
+                                    <div className="tab-content">
+                                        {activeTab === 'text' ?
+                                            <textarea value={resumeText} readOnly /> :
+                                            <div className="preview-container">
+                                                {isGeneratingPreview ? <div className="loader"></div> : <PreviewRenderer content={previewContent} type={previewType} />}
+                                            </div>
+                                        }
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="resume-input">
+                                    <textarea
+                                        placeholder="Or paste your resume here..."
+                                        value={resumeText}
+                                        onChange={(e) => setResumeText(e.target.value)}
+                                        aria-label="Resume text input"
+                                    />
+                                </div>
+                            )}
+
+                            <div className="button-group">
+                                <button onClick={handleUploadClick} className="button button-secondary">
+                                    <span className="material-icons">upload_file</span>
+                                    Upload Resume
+                                </button>
+                                <input
+                                    type="file"
+                                    ref={fileInputRef}
+                                    style={{ display: 'none' }}
+                                    onChange={handleFileChange}
+                                    accept=".txt,.md,.pdf,.docx"
+                                />
+                                <button onClick={handleAnalyze} disabled={!resumeText.trim()} className="button button-primary">
+                                    Analyze Resume
+                                    <span className="material-icons">arrow_forward</span>
+                                </button>
+                            </div>
+                             {error && <div className="error-message">{error}</div>}
+                        </div>
+                    </>
+                );
+        }
+    };
+
 
     return (
-        <div className="container">
-            {renderAuth()}
-            <div className="header">
-                <h1>AI Resume Analyzer & Job Finder</h1>
-                {(!user && firebaseInitialized) && <p>Sign in to get an expert analysis and find relevant job opportunities.</p>}
+        <>
+        <header className="app-header">
+            <a href="/" className="logo">
+                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M12 2L2 7V17L12 22L22 17V7L12 2Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/><path d="M2 7L12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/><path d="M12 22V12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/><path d="M22 7L12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/><path d="M17 4.5L7 9.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                <span>Resumate</span>
+            </a>
+             <div className="auth-controls">
+                {user ? (
+                    <div className="user-info">
+                         <img src={user.photoURL || undefined} alt="User avatar" className="avatar" />
+                         <span className="user-name">{user.displayName}</span>
+                         <button onClick={handleSignOut} className="button button-secondary">Sign Out</button>
+                    </div>
+                ) : (
+                    <button onClick={handleSignIn} className="button button-primary">Sign In</button>
+                )}
             </div>
-
-            {error && !user && <div className="error-message">{error.split('\n').map((line, i) => <p key={i} style={{margin:0, padding: '0.1rem 0'}}>{line}</p>)}</div>}
-            
-            {authLoading && firebaseInitialized && <Loader text="Authenticating..." />}
-
-            {!authLoading && !user && firebaseInitialized && (
-                <AuthScreen onGoogleSignIn={handleGoogleSignIn} />
-            )}
-            
-            {!authLoading && (!firebaseInitialized || user) && (
-                <>
-                    {error && user && <div className="error-message">{error.split('\n').map((line, i) => <p key={i} style={{margin:0, padding: '0.1rem 0'}}>{line}</p>)}</div>}
-                    {(step === 'input' || step === 'analyzing') && !analysisResult && (
-                         <div className="resume-input">
-                            <textarea
-                                value={resumeText}
-                                onChange={(e) => setResumeText(e.target.value)}
-                                placeholder="Paste your full resume here, or upload a file below."
-                                disabled={isLoading}
-                                aria-label="Resume Input"
-                            />
-                            <p className="upload-helper">Upload your resume file (.txt, .md, .pdf, .docx).</p>
-                            <div className="button-group">
-                                 <button className="button button-secondary" onClick={handleUploadClick} disabled={isLoading}>
-                                     <span className="material-icons">upload_file</span>
-                                     Upload File
-                                 </button>
-                                 <button className="button button-primary" onClick={handleAnalyze} disabled={isLoading || !resumeText.trim()}>
-                                    <span className="material-icons">psychology</span>
-                                    Analyze Resume
-                                 </button>
-                            </div>
-                            <input type="file" ref={fileInputRef} onChange={handleFileChange} style={{ display: 'none' }} accept=".txt,.md,.pdf,.docx" />
-                         </div>
-                    )}
-                    
-                    {step === 'analyzing' && <Loader text="Analyzing your resume..." />}
-
-                    {(step === 'analysis_result' || step === 'finding_jobs' || step === 'jobs_result') && analysisResult && (
-                        <div className="results-section analysis-results">
-                            <h2>Resume Analysis</h2>
-                             <div className="analysis-grid">
-                                <div className="results-card">
-                                    <h3>Summary</h3>
-                                    <p>{analysisResult.summary}</p>
-                                    <h3>Suggested Role</h3>
-                                    <p className="role-suggestion">{analysisResult.role}</p>
-                                </div>
-                                <div className="ats-score-container">
-                                     <div className="ats-score-circle" style={{backgroundColor: getScoreColor(analysisResult.atsScore)}}>
-                                        {analysisResult.atsScore}
-                                    </div>
-                                    <h3>ATS Friendliness Score</h3>
-                                </div>
-                             </div>
-                             <div className="results-card" style={{marginTop: '1.5rem'}}>
-                                <div className="improvements-section">
-                                    <h3><span className="material-icons">lightbulb</span>Areas for Improvement</h3>
-                                    <div dangerouslySetInnerHTML={{ __html: marked(analysisResult.improvementSuggestions) }} />
-                                </div>
-                            </div>
-                             <div className="results-card" style={{marginTop: '1.5rem'}}>
-                                <h3>Key Skills Analysis</h3>
-                                <SkillsChart skills={analysisResult.skills} />
-                                <div className="skills-list">
-                                    {analysisResult.skills.map(skill => ( <span key={skill.skillName} className="skill-tag">{skill.skillName}</span> ))}
-                                </div>
-                            </div>
-                             <div className="button-group">
-                                 <button className="button button-primary" onClick={handleFindJobs} disabled={isLoading}>
-                                     <span className="material-icons">work</span> Find Jobs
-                                 </button>
-                                 <button className="button button-secondary" onClick={handleStartOver} disabled={isLoading}>
-                                     <span className="material-icons">refresh</span> Start New Analysis
-                                 </button>
-                            </div>
-                        </div>
-                    )}
-
-                    {step === 'finding_jobs' && <Loader text="Searching for the best jobs for you..." />}
-
-                    {step === 'jobs_result' && jobsResult && (
-                        <div className="results-section job-results">
-                             <div className="job-header">
-                                <h2>Recommended Job Openings</h2>
-                                <div className="sort-container">
-                                    <label htmlFor="job-sort">Sort by:</label>
-                                    <select 
-                                        id="job-sort" 
-                                        value={jobSortOrder} 
-                                        onChange={(e) => setJobSortOrder(e.target.value)}
-                                        className="sort-select"
-                                    >
-                                        <option value="relevance">Relevance</option>
-                                        <option value="newest">Date (Newest)</option>
-                                        <option value="oldest">Date (Oldest)</option>
-                                    </select>
-                                </div>
-                            </div>
-                            <div className="job-listings">
-                                {sortedJobs.map((job, index) => {
-                                     let sourceHostname = null;
-                                     try { sourceHostname = new URL(job.applyLink).hostname.replace(/^www\./, ''); } catch (e) {}
-                                     return (
-                                         <div key={index} className="job-card">
-                                             <h3>{job.title}</h3>
-                                             <div className="job-card-meta">
-                                                 <p className="company">{job.company} - {job.location}</p>
-                                                 {job.datePosted && <p className="job-date">{job.datePosted}</p>}
-                                             </div>
-                                             {sourceHostname && <p className="job-source">Source: {sourceHostname}</p>}
-                                             <p className="description">{job.description}</p>
-                                             <a href={job.applyLink} target="_blank" rel="noopener noreferrer" className="button button-primary">Apply Now</a>
-                                         </div>
-                                     );
-                                })}
-                            </div>
-
-                            {jobsResult.sources.length > 0 && (
-                                <details className="sources-container">
-                                     <summary>View Sources ({jobsResult.sources.length})</summary>
-                                     <ul className="sources-list">
-                                        {jobsResult.sources.filter(s => s.web).map((s, i) => (
-                                             <li key={i}><a href={s.web.uri} target="_blank" rel="noopener noreferrer">{s.web.title || s.web.uri}</a></li>
-                                        ))}
-                                    </ul>
-                                </details>
-                            )}
-                        </div>
-                    )}
-
-                    {analysisHistory.length > 0 && firebaseInitialized && step === 'input' && !analysisResult && (
-                        <div className="history-section">
-                            <h2>Analysis History</h2>
-                            <div className="history-grid">
-                                {analysisHistory.map(item => (
-                                    <div key={item.id} className="history-card" onClick={() => handleHistoryItemClick(item)}>
-                                        <h4>{item.role}</h4>
-                                        <p>{item.createdAt.toLocaleDateString()}</p>
-                                    </div>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                </>
-            )}
-        </div>
+        </header>
+        <main className="container">
+            {renderContent()}
+        </main>
+        </>
     );
 };
 
-const Loader = ({ text }: { text: string }) => (
-    <div className="loader">
-        <div className="spinner"></div>
-        <span>{text}</span>
-    </div>
-);
-
-const container = document.getElementById('root');
-const root = createRoot(container!);
+const root = createRoot(document.getElementById('root') as HTMLElement);
 root.render(<App />);

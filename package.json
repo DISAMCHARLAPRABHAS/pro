@@ -1,5 +1,5 @@
 {
-  "name": "app",
+  "name": "resumate",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -16,7 +16,7 @@
     "chart.js": "^4.4.3",
     "mammoth": "^1.7.0",
     "pdfjs-dist": "^4.4.170",
-    "firebase": "^12.5.0"
+    "firebase": "^12.6.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
