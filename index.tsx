@@ -1,7 +1,8 @@
+
+
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-// BUG FIX (Line 4): Import *all* exports from the module as 'genai'
-import * as genai from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 import { marked } from 'marked';
 import { Chart, BarController, BarElement, CategoryScale, LinearScale, Tooltip, Legend } from 'chart.js';
 import mammoth from 'mammoth';
@@ -73,8 +74,7 @@ const PDFPreview = ({ file }: { file: ArrayBuffer | null }) => {
         const renderPdf = async () => {
             try {
                 // Use a copy of the buffer as pdfjs might transfer it
-                // FIX: Pass the ArrayBuffer as an object with the 'data' key
-                const pdf = await pdfjsLib.getDocument({ data: file.slice(0) }).promise;
+                const pdf = await pdfjsLib.getDocument(file.slice(0)).promise;
                 for (let i = 1; i <= pdf.numPages; i++) {
                     const page = await pdf.getPage(i);
                     // Adjust scale for better resolution
@@ -93,12 +93,12 @@ const PDFPreview = ({ file }: { file: ArrayBuffer | null }) => {
                     canvas.height = viewport.height;
                     canvas.width = viewport.width;
 
-                    // FIX: The TypeScript error indicates that the 'canvas' property is required
-                    // in the RenderParameters object for pdfjs-dist. This is likely due to a
-                    // mismatch in the project's type definitions. Adding the property to satisfy the compiler.
+                    // Fix: Add the 'canvas' property to the render context to satisfy the RenderParameters type for pdfjs-dist.
+                    // This is likely required due to a mismatch in the project's type definitions.
                     const renderContext = {
                         canvasContext: context,
                         viewport: viewport,
+                        canvas: canvas,
                     };
                     await page.render(renderContext).promise;
                     container.appendChild(canvas);
@@ -205,9 +205,12 @@ interface JobCardProps {
     isSaved: boolean;
     onToggleSave: () => void;
     cardIndex: number;
+    feedback: 'like' | 'dislike' | null;
+    onLike: () => void;
+    onDislike: () => void;
 }
 
-const JobCard: React.FC<JobCardProps> = ({ job, isSaved, onToggleSave, cardIndex }) => {
+const JobCard: React.FC<JobCardProps> = ({ job, isSaved, onToggleSave, cardIndex, feedback, onLike, onDislike }) => {
     let sourceHostname = null;
     const sourceUrl = job.sourceUrl || job.applyLink;
     try { sourceHostname = new URL(String(sourceUrl)).hostname.replace(/^www\./, ''); } catch (e) { }
@@ -239,10 +242,28 @@ const JobCard: React.FC<JobCardProps> = ({ job, isSaved, onToggleSave, cardIndex
                     </button>
                 )}
             </div>
-            <a href={job.applyLink} target="_blank" rel="noopener noreferrer" className="button button-primary">
-                Apply Now
-                <span className="material-icons button-external-icon">open_in_new</span>
-            </a>
+            <div className="job-card-actions">
+                 <div className="feedback-buttons">
+                    <button 
+                        className={`feedback-button like-button ${feedback === 'like' ? 'liked' : ''}`} 
+                        onClick={onLike} 
+                        aria-label="Like this job recommendation"
+                    >
+                        <span className="material-icons">thumb_up</span>
+                    </button>
+                    <button 
+                        className={`feedback-button dislike-button ${feedback === 'dislike' ? 'disliked' : ''}`} 
+                        onClick={onDislike} 
+                        aria-label="Dislike this job recommendation"
+                    >
+                        <span className="material-icons">thumb_down</span>
+                    </button>
+                </div>
+                <a href={job.applyLink} target="_blank" rel="noopener noreferrer" className="button button-primary">
+                    Apply Now
+                    <span className="material-icons button-external-icon">open_in_new</span>
+                </a>
+            </div>
         </div>
     );
 };
@@ -274,6 +295,7 @@ const App = () => {
     const [profileSaved, setProfileSaved] = useState(false);
     const [isFindingMoreJobs, setIsFindingMoreJobs] = useState(false);
     const [user, setUser] = useState<firebase.User | null>(null);
+    const [jobFeedback, setJobFeedback] = useState<Record<string, 'like' | 'dislike'>>({});
 
     // Resume preview state
     const [activeTab, setActiveTab] = useState<'text' | 'preview'>('text');
@@ -282,13 +304,7 @@ const App = () => {
     const [isGeneratingPreview, setIsGeneratingPreview] = useState(false);
     const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
 
-    // SECURITY WARNING: Exposing an API key client-side is a significant security risk.
-    // Any user can view your key and use it, leading to unexpected charges.
-    // For production, this logic should be moved to a secure backend (e.g., a serverless function)
-    // that proxies the request to the GenAI API.
-    
-    // BUG FIX (Line 230): Instantiate the class from the 'genai' module
-    const ai = useMemo(() => new genai.GoogleGenerativeAI({ apiKey: process.env.API_KEY as string }), []);
+    const ai = useMemo(() => new GoogleGenAI({ apiKey: process.env.API_KEY as string }), []);
 
     useEffect(() => {
         if (!firebaseInitialized || !auth) return;
@@ -370,8 +386,7 @@ const App = () => {
                 setPreviewContent(resultHtml.value);
                 setPreviewType('html');
             } else if (extension === 'pdf') {
-                // FIX: Pass the ArrayBuffer as an object with the 'data' key
-                const pdf = await pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }).promise;
+                const pdf = await pdfjsLib.getDocument(arrayBuffer.slice(0)).promise;
                 let fullText = '';
                 for (let i = 1; i <= pdf.numPages; i++) {
                     const page = await pdf.getPage(i);
@@ -409,38 +424,33 @@ const App = () => {
         setAnalysisResult(null);
 
         try {
-            const prompt = `Analyze this resume and return a JSON object with the following structure:
-{
-  "summary": "A concise two-sentence summary of the candidate's profile.",
-  "skills": [
-    {
-      "skillName": "Name of a key skill",
-      "prevalence": "Score from 1 (low) to 5 (high)."
-    }
-  ],
-  "role": "A suitable job title for the candidate.",
-  "atsScore": "An estimated ATS-friendliness score out of 100.",
-  "experienceLevel": "Estimate the candidate's experience level (e.g., 'Entry-Level', 'Mid-Level', 'Senior', 'Executive').",
-  "improvementSuggestions": "2-3 actionable bullet points ('*') on improving the resume."
-}
+            const analysisSchema = {
+                type: Type.OBJECT,
+                properties: {
+                    summary: { type: Type.STRING, description: "A concise two-sentence summary of the candidate's profile." },
+                    skills: {
+                        type: Type.ARRAY, items: {
+                            type: Type.OBJECT, properties: {
+                                skillName: { type: Type.STRING },
+                                prevalence: { type: Type.NUMBER, description: "Score from 1 (low) to 5 (high)." }
+                            }, required: ["skillName", "prevalence"]
+                        }
+                    },
+                    role: { type: Type.STRING, description: "A suitable job title for the candidate." },
+                    atsScore: { type: Type.NUMBER, description: "An estimated ATS-friendliness score out of 100." },
+                    experienceLevel: { type: Type.STRING, description: "Estimate the candidate's experience level (e.g., 'Entry-Level', 'Mid-Level', 'Senior', 'Executive')." },
+                    improvementSuggestions: { type: Type.STRING, description: "2-3 actionable bullet points ('*') on improving the resume." }
+                },
+                required: ["summary", "skills", "role", "atsScore", "experienceLevel", "improvementSuggestions"]
+            };
 
-Here is the resume:
----
-${resumeText}
----
-`;
-
-            // This (and the other model calls) uses the modern v1 SDK syntax
-            // Now 'ai' is correctly instantiated, so 'getGenerativeModel' will exist.
-            const model = ai.getGenerativeModel({
+            const response = await ai.models.generateContent({
                 model: 'gemini-flash-latest',
-                generationConfig: { responseMimeType: "application/json" },
+                contents: `Analyze this resume: \n\n${resumeText}`,
+                config: { responseMimeType: "application/json", responseSchema: analysisSchema },
             });
 
-            const result = await model.generateContent(prompt);
-            const response = result.response;
-            const resultJson = JSON.parse(response.text()) as AnalysisResult;
-            
+            const resultJson = JSON.parse(response.text) as AnalysisResult;
             setAnalysisResult(resultJson);
             setExperienceLevel(resultJson.experienceLevel);
             setStep('analysis_result');
@@ -453,7 +463,7 @@ ${resumeText}
         }
     };
 
-    const generateJobSearchPrompt = (findMore = false) => {
+    const generateJobSearchPrompt = (findMore = false, currentJobs: Job[] = [], feedback: Record<string, 'like' | 'dislike'> = {}, saved: Job[] = []) => {
         if (!analysisResult) return '';
 
         let profilePromptSection = '';
@@ -471,7 +481,36 @@ ${resumeText}
             - Desired Annual Salary Range (INR): ${salaryRange || 'Not specified'}
             - Career Goals: ${userProfile.careerGoals || 'Not specified'}
 
-            Use this profile to further refine the job search. Prioritize roles matching the preferred titles and locations. Consider the salary range and career goals whenevaluating relevance.
+            Use this profile to further refine the job search. Prioritize roles matching the preferred titles and locations. Consider the salary range and career goals when evaluating relevance.
+            `;
+        }
+        
+        const likedJobs = new Map<string, Job>();
+        currentJobs.forEach(job => {
+            if (feedback[job.applyLink] === 'like') {
+                likedJobs.set(job.applyLink, job);
+            }
+        });
+        saved.forEach(job => {
+            likedJobs.set(job.applyLink, job);
+        });
+        const dislikedJobs = currentJobs.filter(job => feedback[job.applyLink] === 'dislike');
+
+        let feedbackPromptSection = '';
+        if (likedJobs.size > 0) {
+            const likedJobsList = Array.from(likedJobs.values()).map(job => `- ${job.title} at ${job.company}`).join('\n');
+            feedbackPromptSection += `
+            
+            The user has shown POSITIVE interest in these jobs. Find more opportunities with similar titles, skills, and companies:
+            ${likedJobsList}
+            `;
+        }
+        if (dislikedJobs.length > 0) {
+            const dislikedJobsList = dislikedJobs.map(job => `- ${job.title} at ${job.company}`).join('\n');
+            feedbackPromptSection += `
+            
+            The user has shown NEGATIVE interest in these jobs. AVOID suggesting roles with similar titles and descriptions:
+            ${dislikedJobsList}
             `;
         }
 
@@ -485,7 +524,7 @@ ${resumeText}
             `;
         }
 
-        return `Based on this resume analysis, find at least 20 relevant and recent job openings in India.
+        return `Based on this resume analysis, find 10 relevant and recent job openings in India.
         Analysis:
         - Ideal Role: ${analysisResult.role}
         - Key Skills: ${analysisResult.skills.map(s => s.skillName).join(', ')}
@@ -495,6 +534,7 @@ ${resumeText}
         - Experience Level: ${experienceLevel}
         - Preferred Companies: ${preferredCompanies.trim() ? preferredCompanies.trim() : 'Any'}
         ${profilePromptSection}
+        ${feedbackPromptSection}
         Prioritize jobs that closely match the specified experience level and ideal role. If preferred companies are listed, heavily weigh results from those companies, but also include other relevant opportunities. Use the key skills and summary for keyword matching.
         ${existingJobsSection}
         IMPORTANT: Return a JSON object inside a markdown block (\`\`\`json ... \`\`\`). The JSON object must have one key "jobs", an array of objects. Each object must have keys: "title", "company", "location", "description" (1-2 sentences), "applyLink" (a direct URL to the application page), "sourceUrl" (the URL of the page where the job was found), and "datePosted" (the estimated posting date in "YYYY-MM-DD" format).`;
@@ -507,17 +547,15 @@ ${resumeText}
         setJobsResult(null);
 
         try {
-            const prompt = generateJobSearchPrompt();
-
-            const model = ai.getGenerativeModel({
+            const prompt = generateJobSearchPrompt(false, [], {}, savedJobs);
+            const response = await ai.models.generateContent({
                 model: 'gemini-flash-latest',
-                tools: [{ googleSearch: {} }],
+                contents: prompt,
+                config: { tools: [{ googleSearch: {} }] },
             });
 
-            const result = await model.generateContent(prompt);
-            const response = result.response;
-            const text = response.text();
-            
+            const text = response.text;
+
             const jsonBlockMatch = text.match(/```json\n([\s\S]*?)\n```/);
             if (!jsonBlockMatch || !jsonBlockMatch[1]) {
                 throw new Error("AI response did not contain a valid JSON job list.");
@@ -543,17 +581,14 @@ ${resumeText}
         setError(null);
 
         try {
-            const prompt = generateJobSearchPrompt(true);
-
-            const model = ai.getGenerativeModel({
+            const prompt = generateJobSearchPrompt(true, jobsResult?.jobs || [], jobFeedback, savedJobs);
+            const response = await ai.models.generateContent({
                 model: 'gemini-flash-latest',
-                tools: [{ googleSearch: {} }],
+                contents: prompt,
+                config: { tools: [{ googleSearch: {} }] },
             });
 
-            const result = await model.generateContent(prompt);
-            const response = result.response;
-            const text = response.text();
-
+            const text = response.text;
             const jsonBlockMatch = text.match(/```json\n([\s\S]*?)\n```/);
             if (!jsonBlockMatch || !jsonBlockMatch[1]) {
                 throw new Error("AI response did not contain a valid JSON job list.");
@@ -623,6 +658,21 @@ ${resumeText}
         }
     };
     
+    const handleJobFeedback = (jobToUpdate: Job, newFeedback: 'like' | 'dislike') => {
+        const { applyLink } = jobToUpdate;
+        setJobFeedback(prev => {
+            const currentFeedback = prev[applyLink];
+            const updatedFeedback = { ...prev };
+
+            if (currentFeedback === newFeedback) {
+                delete updatedFeedback[applyLink];
+            } else {
+                updatedFeedback[applyLink] = newFeedback;
+            }
+            return updatedFeedback;
+        });
+    };
+
     const sortedAndFilteredJobs = useMemo(() => {
         if (!jobsResult?.jobs) return [];
         let jobs = [...jobsResult.jobs];
@@ -682,9 +732,9 @@ ${resumeText}
                     <div className="analysis-results">
                         {/* Summary and Role */}
                         <div className="results-card card">
-                            <h3>AI Summary</h3>
-                            <p>{analysisResult.summary}</p>
-                            <p>Suggested Role: <strong className="role-suggestion">{analysisResult.role}</strong></p>
+                             <h3>AI Summary</h3>
+                             <p>{analysisResult.summary}</p>
+                             <p>Suggested Role: <strong className="role-suggestion">{analysisResult.role}</strong></p>
                         </div>
                         {/* Skills and ATS */}
                          <div className="analysis-grid">
@@ -769,6 +819,9 @@ ${resumeText}
                                     cardIndex={index}
                                     isSaved={savedJobs.some(saved => saved.applyLink === job.applyLink)}
                                     onToggleSave={() => toggleSaveJob(job)}
+                                    feedback={jobFeedback[job.applyLink] || null}
+                                    onLike={() => handleJobFeedback(job, 'like')}
+                                    onDislike={() => handleJobFeedback(job, 'dislike')}
                                 />
                             ))}
                         </div>

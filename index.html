@@ -4,7 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Resumate - AI Career Copilot</title>
+    <!-- Import Google Icons -->
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <!-- Import Google Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Lexend:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -445,9 +447,78 @@
             margin: 0;
         }
 
-        .job-card { position: relative; }
+        .job-card { 
+            position: relative;
+            display: flex;
+            flex-direction: column;
+        }
+        .job-card .description-container {
+            flex-grow: 1;
+        }
         .job-card h3 { color: var(--dark-color); }
         .job-card p { color: var(--secondary-text-color); }
+
+        .job-card-actions {
+            margin-top: 1.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .feedback-buttons {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .feedback-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 44px;
+            height: 44px;
+            border-radius: 50%;
+            border: var(--border-width) solid var(--border-color);
+            background-color: var(--surface-color);
+            cursor: pointer;
+            color: var(--secondary-text-color);
+            transition: all 0.2s ease;
+        }
+
+        .feedback-button .material-icons {
+            font-size: 20px;
+        }
+
+        .feedback-button:hover {
+            background-color: #f3f4f6;
+        }
+
+        .feedback-button.like-button:hover {
+            color: var(--primary-color);
+        }
+        .feedback-button.dislike-button:hover {
+            color: var(--danger-color);
+        }
+
+        .feedback-button.liked {
+            background-color: var(--primary-color);
+            color: var(--dark-color);
+            border-color: var(--dark-color);
+        }
+        .feedback-button.liked .material-icons,
+        .feedback-button.disliked .material-icons {
+            font-variation-settings: 'FILL' 1;
+        }
+
+        .feedback-button.disliked {
+            background-color: var(--danger-color);
+            color: var(--surface-color);
+            border-color: var(--dark-color);
+        }
+
+        .job-card .button-primary {
+            flex-shrink: 0;
+        }
 
         .save-job-button {
             position: absolute;
@@ -505,10 +576,8 @@
     "pdfjs-dist/build/pdf.worker.mjs": "https://aistudiocdn.com/pdfjs-dist@^4.4.170/build/pdf.worker.mjs",
     "firebase/compat/app": "https://aistudiocdn.com/firebase@^9.6.1/compat/app",
     "firebase/compat/auth": "https://aistudiocdn.com/firebase@^9.6.1/compat/auth",
-css
     "firebase/compat/firestore": "https://aistudiocdn.com/firebase@^9.6.1/compat/firestore",
-    
-    "firebase/": "https://aistudiocdn.com/firebase@^9.6.1/"
+    "firebase/": "https://aistudiocdn.com/firebase@^12.6.0/"
   }
 }
 </script>
