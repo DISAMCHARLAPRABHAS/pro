@@ -73,7 +73,8 @@ const PDFPreview = ({ file }: { file: ArrayBuffer | null }) => {
         const renderPdf = async () => {
             try {
                 // Use a copy of the buffer as pdfjs might transfer it
-                const pdf = await pdfjsLib.getDocument(file.slice(0)).promise;
+                // FIX: Pass the ArrayBuffer as an object with the 'data' key
+                const pdf = await pdfjsLib.getDocument({ data: file.slice(0) }).promise;
                 for (let i = 1; i <= pdf.numPages; i++) {
                     const page = await pdf.getPage(i);
                     // Adjust scale for better resolution
@@ -369,7 +370,8 @@ const App = () => {
                 setPreviewContent(resultHtml.value);
                 setPreviewType('html');
             } else if (extension === 'pdf') {
-                const pdf = await pdfjsLib.getDocument(arrayBuffer.slice(0)).promise;
+                // FIX: Pass the ArrayBuffer as an object with the 'data' key
+                const pdf = await pdfjsLib.getDocument({ data: arrayBuffer.slice(0) }).promise;
                 let fullText = '';
                 for (let i = 1; i <= pdf.numPages; i++) {
                     const page = await pdf.getPage(i);
@@ -680,9 +682,9 @@ ${resumeText}
                     <div className="analysis-results">
                         {/* Summary and Role */}
                         <div className="results-card card">
-                             <h3>AI Summary</h3>
-                             <p>{analysisResult.summary}</p>
-                             <p>Suggested Role: <strong className="role-suggestion">{analysisResult.role}</strong></p>
+                            <h3>AI Summary</h3>
+                            <p>{analysisResult.summary}</p>
+                            <p>Suggested Role: <strong className="role-suggestion">{analysisResult.role}</strong></p>
                         </div>
                         {/* Skills and ATS */}
                          <div className="analysis-grid">
