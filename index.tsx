@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
-// BUG FIX: Removed 'Type' as it's not exported in the v1 SDK
-import { GoogleGenAI } from '@google/genai';
+// BUG FIX: The class name is GoogleGenerativeAI, not GoogleGenAI
+import { GoogleGenerativeAI } from '@google/genai';
 import { marked } from 'marked';
 import { Chart, BarController, BarElement, CategoryScale, LinearScale, Tooltip, Legend } from 'chart.js';
 import mammoth from 'mammoth';
@@ -285,7 +285,8 @@ const App = () => {
     // Any user can view your key and use it, leading to unexpected charges.
     // For production, this logic should be moved to a secure backend (e.g., a serverless function)
     // that proxies the request to the GenAI API.
-    const ai = useMemo(() => new GoogleGenAI({ apiKey: process.env.API_KEY as string }), []);
+    // BUG FIX: The class name is GoogleGenerativeAI, not GoogleGenAI
+    const ai = useMemo(() => new GoogleGenerativeAI({ apiKey: process.env.API_KEY as string }), []);
 
     useEffect(() => {
         if (!firebaseInitialized || !auth) return;
@@ -405,8 +406,6 @@ const App = () => {
         setAnalysisResult(null);
 
         try {
-            // BUG FIX: Removed obsolete 'analysisSchema'.
-            // The schema definition is now moved into the prompt.
             const prompt = `Analyze this resume and return a JSON object with the following structure:
 {
   "summary": "A concise two-sentence summary of the candidate's profile.",
@@ -428,16 +427,14 @@ ${resumeText}
 ---
 `;
 
-            // BUG FIX: Updated to modern v1 SDK syntax
+            // This (and the other model calls) uses the modern v1 SDK syntax
             const model = ai.getGenerativeModel({
                 model: 'gemini-flash-latest',
-                // BUG FIX: 'responseMimeType' is set in 'generationConfig'
                 generationConfig: { responseMimeType: "application/json" },
             });
 
             const result = await model.generateContent(prompt);
             const response = result.response;
-            // BUG FIX: Get text from 'response.text()'
             const resultJson = JSON.parse(response.text()) as AnalysisResult;
             
             setAnalysisResult(resultJson);
@@ -508,7 +505,6 @@ ${resumeText}
         try {
             const prompt = generateJobSearchPrompt();
 
-            // BUG FIX: Updated to modern v1 SDK syntax
             const model = ai.getGenerativeModel({
                 model: 'gemini-flash-latest',
                 tools: [{ googleSearch: {} }],
@@ -516,7 +512,6 @@ ${resumeText}
 
             const result = await model.generateContent(prompt);
             const response = result.response;
-            // BUG FIX: Get text from 'response.text()'
             const text = response.text();
             
             const jsonBlockMatch = text.match(/```json\n([\s\S]*?)\n```/);
@@ -546,7 +541,6 @@ ${resumeText}
         try {
             const prompt = generateJobSearchPrompt(true);
 
-            // BUG FIX: Updated to modern v1 SDK syntax
             const model = ai.getGenerativeModel({
                 model: 'gemini-flash-latest',
                 tools: [{ googleSearch: {} }],
@@ -554,7 +548,6 @@ ${resumeText}
 
             const result = await model.generateContent(prompt);
             const response = result.response;
-            // BUG FIX: Get text from 'response.text()'
             const text = response.text();
 
             const jsonBlockMatch = text.match(/```json\n([\s\S]*?)\n```/);
