@@ -1,5 +1,3 @@
-
-
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -7,7 +5,9 @@ import { marked } from 'marked';
 import { Chart, BarController, BarElement, CategoryScale, LinearScale, Tooltip, Legend } from 'chart.js';
 import mammoth from 'mammoth';
 import * as pdfjsLib from 'pdfjs-dist';
-import { auth, db, firebaseInitialized, firebase } from './firebase';
+import { auth, db, firebaseInitialized, firebaseError } from './firebase';
+import { onAuthStateChanged, getRedirectResult, signInWithRedirect, signOut, GoogleAuthProvider, User } from 'firebase/auth';
+import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 
 // Configure PDF.js worker
@@ -52,6 +52,8 @@ const defaultUserProfile = {
     maxSalary: '',
     careerGoals: '',
     locationPreference: '',
+    jobAlertsEnabled: false,
+    jobAlertsFrequency: 'weekly' as 'daily' | 'weekly',
 };
 
 interface UserProfile {
@@ -60,6 +62,8 @@ interface UserProfile {
     maxSalary: string;
     careerGoals: string;
     locationPreference: string;
+    jobAlertsEnabled: boolean;
+    jobAlertsFrequency: 'daily' | 'weekly';
 }
 
 const PDFPreview = ({ file }: { file: ArrayBuffer | null }) => {
@@ -205,10 +209,11 @@ interface JobCardProps {
     isSaved: boolean;
     onToggleSave: () => void;
     cardIndex: number;
-    feedback: 'like' | 'dislike' | null;
-    onLike: () => void;
-    onDislike: () => void;
+    feedback?: 'like' | 'dislike' | null;
+    onLike?: () => void;
+    onDislike?: () => void;
 }
+
 
 const JobCard: React.FC<JobCardProps> = ({ job, isSaved, onToggleSave, cardIndex, feedback, onLike, onDislike }) => {
     let sourceHostname = null;
@@ -243,22 +248,24 @@ const JobCard: React.FC<JobCardProps> = ({ job, isSaved, onToggleSave, cardIndex
                 )}
             </div>
             <div className="job-card-actions">
-                 <div className="feedback-buttons">
-                    <button 
-                        className={`feedback-button like-button ${feedback === 'like' ? 'liked' : ''}`} 
-                        onClick={onLike} 
-                        aria-label="Like this job recommendation"
-                    >
-                        <span className="material-icons">thumb_up</span>
-                    </button>
-                    <button 
-                        className={`feedback-button dislike-button ${feedback === 'dislike' ? 'disliked' : ''}`} 
-                        onClick={onDislike} 
-                        aria-label="Dislike this job recommendation"
-                    >
-                        <span className="material-icons">thumb_down</span>
-                    </button>
-                </div>
+                 {onLike && onDislike ? (
+                    <div className="feedback-buttons">
+                        <button
+                            className={`feedback-button like-button ${feedback === 'like' ? 'liked' : ''}`}
+                            onClick={onLike}
+                            aria-label="Like this job recommendation"
+                        >
+                            <span className="material-icons">thumb_up</span>
+                        </button>
+                        <button
+                            className={`feedback-button dislike-button ${feedback === 'dislike' ? 'disliked' : ''}`}
+                            onClick={onDislike}
+                            aria-label="Dislike this job recommendation"
+                        >
+                            <span className="material-icons">thumb_down</span>
+                        </button>
+                    </div>
+                ) : <div />}
                 <a href={job.applyLink} target="_blank" rel="noopener noreferrer" className="button button-primary">
                     Apply Now
                     <span className="material-icons button-external-icon">open_in_new</span>
@@ -294,8 +301,10 @@ const App = () => {
     const [userProfile, setUserProfile] = useState<UserProfile>(defaultUserProfile);
     const [profileSaved, setProfileSaved] = useState(false);
     const [isFindingMoreJobs, setIsFindingMoreJobs] = useState(false);
-    const [user, setUser] = useState<firebase.User | null>(null);
+    const [user, setUser] = useState<User | null>(null);
+    const [isAuthLoading, setIsAuthLoading] = useState(true);
     const [jobFeedback, setJobFeedback] = useState<Record<string, 'like' | 'dislike'>>({});
+    const [currentView, setCurrentView] = useState<'main' | 'saved_jobs'>('main');
 
     // Resume preview state
     const [activeTab, setActiveTab] = useState<'text' | 'preview'>('text');
@@ -307,33 +316,46 @@ const App = () => {
     const ai = useMemo(() => new GoogleGenAI({ apiKey: process.env.API_KEY as string }), []);
 
     useEffect(() => {
-        if (!firebaseInitialized || !auth) return;
+        if (!firebaseInitialized || !auth) {
+            setIsAuthLoading(false);
+            return;
+        }
 
-        const unsubscribe = auth.onAuthStateChanged(async (user) => {
+        const unsubscribe = onAuthStateChanged(auth, async (user) => {
             setUser(user);
             if (user && db) {
-                // User is signed in, fetch data from Firestore
-                const userDocRef = db.collection('users').doc(user.uid);
+                const userDocRef = doc(db, 'users', user.uid);
                 try {
-                    const doc = await userDocRef.get();
-                    if (doc.exists) {
-                        const data = doc.data();
+                    const docSnap = await getDoc(userDocRef);
+                    if (docSnap.exists()) {
+                        const data = docSnap.data();
                         setSavedJobs(data?.savedJobs || []);
-                        setUserProfile(data?.userProfile || defaultUserProfile);
+                        setUserProfile(prevProfile => ({...defaultUserProfile, ...data?.userProfile}));
                     } else {
-                        // New user, create a document
-                        await userDocRef.set({ savedJobs: [], userProfile: defaultUserProfile });
+                        await setDoc(userDocRef, { savedJobs: [], userProfile: defaultUserProfile });
                     }
                 } catch (e) {
                     console.error("Error fetching user data from Firestore:", e);
                     setError("Could not load your profile data.");
                 }
             } else {
-                // User is signed out, clear data
                 setSavedJobs([]);
                 setUserProfile(defaultUserProfile);
             }
+            setIsAuthLoading(false);
         });
+
+        // Handle sign-in redirect errors
+        const handleRedirectResult = async () => {
+            if (!auth) return;
+            try {
+                await getRedirectResult(auth);
+            } catch (error) {
+                console.error("Firebase redirect result error:", error);
+                setError("Failed to complete sign-in. Please try again.");
+            }
+        };
+        handleRedirectResult();
 
         return () => unsubscribe();
     }, [firebaseInitialized]);
@@ -611,9 +633,14 @@ const App = () => {
         }
     };
     
-    const handleProfileChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-        const { name, value } = e.target;
-        setUserProfile(prev => ({ ...prev, [name]: value }));
+    const handleProfileChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
+        const { name, value, type } = e.target;
+        const isCheckbox = type === 'checkbox';
+
+        setUserProfile(prev => ({
+            ...prev,
+            [name]: isCheckbox ? (e.target as HTMLInputElement).checked : value
+        }));
     };
 
     const handleSaveProfile = async () => {
@@ -622,7 +649,7 @@ const App = () => {
             return;
         }
         try {
-            await db.collection('users').doc(user.uid).set({ userProfile }, { merge: true });
+            await setDoc(doc(db, 'users', user.uid), { userProfile }, { merge: true });
             setProfileSaved(true);
             setTimeout(() => setProfileSaved(false), 2000); // Hide message after 2s
         } catch (e) {
@@ -635,7 +662,6 @@ const App = () => {
     const toggleSaveJob = (jobToToggle: Job) => {
         if (!user) {
             setError("Please sign in to save jobs.");
-            // Optionally, trigger sign-in flow
             return;
         }
 
@@ -648,11 +674,10 @@ const App = () => {
         setSavedJobs(updatedSavedJobs);
 
         if (db && user) {
-            db.collection('users').doc(user.uid).set({ savedJobs: updatedSavedJobs }, { merge: true })
+            setDoc(doc(db, 'users', user.uid), { savedJobs: updatedSavedJobs }, { merge: true })
                 .catch(e => {
                     console.error("Error saving job to Firestore:", e);
                     setError("Could not save job. Please try again.");
-                    // Revert state on error
                     setSavedJobs(savedJobs);
                 });
         }
@@ -677,12 +702,10 @@ const App = () => {
         if (!jobsResult?.jobs) return [];
         let jobs = [...jobsResult.jobs];
 
-        // Filter by location
         if (locationFilter.trim()) {
             jobs = jobs.filter(job => job.location.toLowerCase().includes(locationFilter.toLowerCase()));
         }
 
-        // Sort
         if (jobSortOrder === 'date') {
             jobs.sort((a, b) => {
                 const dateA = a.datePosted ? new Date(a.datePosted).getTime() : 0;
@@ -690,31 +713,66 @@ const App = () => {
                 return dateB - dateA;
             });
         }
-        // 'relevance' is default and doesn't require sorting as it comes from the API that way
 
         return jobs;
     }, [jobsResult, locationFilter, jobSortOrder]);
 
     const handleSignIn = async () => {
-        if (!auth || !firebase) return;
-        const provider = new firebase.auth.GoogleAuthProvider();
+        if (!auth) {
+            setError("Authentication service is not available. Please check your configuration.");
+            return;
+        }
+        setIsAuthLoading(true);
+        const provider = new GoogleAuthProvider();
         try {
-            await auth.signInWithPopup(provider);
+            await signInWithRedirect(auth, provider);
         } catch (error) {
             console.error("Authentication error:", error);
-            setError("Failed to sign in. Please try again.");
+            setError("Failed to start sign in process. Please try again.");
+            setIsAuthLoading(false);
         }
     };
 
     const handleSignOut = async () => {
         if (!auth) return;
+        setIsAuthLoading(true);
         try {
-            await auth.signOut();
+            await signOut(auth);
         } catch (error) {
             console.error("Sign out error:", error);
             setError("Failed to sign out.");
+            setIsAuthLoading(false);
         }
     };
+
+    const renderSavedJobs = () => (
+        <section className="my-saved-jobs">
+            <h2>My Saved Jobs</h2>
+            <div className="button-group" style={{ justifyContent: 'flex-start', marginBottom: '2rem' }}>
+                <button onClick={() => setCurrentView('main')} className="button button-secondary">
+                    <span className="material-icons">arrow_back</span>
+                    Back to Main
+                </button>
+            </div>
+            {savedJobs.length > 0 ? (
+                <div className="job-listings">
+                    {savedJobs.map((job, index) => (
+                        <JobCard
+                            key={`${job.applyLink}-${index}`}
+                            job={job}
+                            cardIndex={index}
+                            isSaved={true}
+                            onToggleSave={() => toggleSaveJob(job)}
+                        />
+                    ))}
+                </div>
+            ) : (
+                <div className="card">
+                    <p>You haven't saved any jobs yet. Go find some!</p>
+                </div>
+            )}
+        </section>
+    );
 
 
     const renderContent = () => {
@@ -730,13 +788,11 @@ const App = () => {
             case 'analysis_result':
                 return analysisResult && (
                     <div className="analysis-results">
-                        {/* Summary and Role */}
                         <div className="results-card card">
                              <h3>AI Summary</h3>
                              <p>{analysisResult.summary}</p>
                              <p>Suggested Role: <strong className="role-suggestion">{analysisResult.role}</strong></p>
                         </div>
-                        {/* Skills and ATS */}
                          <div className="analysis-grid">
                             <div className="results-card card">
                                 <h3>Top Skills Analysis</h3>
@@ -750,13 +806,11 @@ const App = () => {
                                 <p>An estimate of your resume's compatibility with automated screening systems.</p>
                             </div>
                         </div>
-                        {/* Suggestions */}
                         <div className="results-card card">
                             <h3>Improvement Suggestions</h3>
                             <div dangerouslySetInnerHTML={{ __html: marked.parse(analysisResult.improvementSuggestions) }}></div>
                         </div>
                         
-                        {/* Career Profile Section */}
                         <div className="profile-section card">
                             <details open>
                                 <summary>
@@ -791,10 +845,32 @@ const App = () => {
                                         <textarea id="careerGoals" name="careerGoals" value={userProfile.careerGoals} onChange={handleProfileChange} rows={3} placeholder="e.g., Transition into a leadership role..."></textarea>
                                     </div>
                                     
+                                     <div className={`job-alerts-section ${userProfile.jobAlertsEnabled ? 'active' : ''}`}>
+                                        <div className="form-group">
+                                            <label>Email Job Alerts</label>
+                                            <div className="alert-controls">
+                                                <p className="form-description" style={{ marginBottom: 0 }}>Get new jobs matching your profile sent to your inbox.</p>
+                                                <div className="alert-options">
+                                                     <label className="toggle-switch">
+                                                        <input type="checkbox" name="jobAlertsEnabled" checked={userProfile.jobAlertsEnabled} onChange={handleProfileChange} />
+                                                        <span className="toggle-slider"></span>
+                                                    </label>
+                                                    <div className="form-group" style={{marginBottom: 0}}>
+                                                         <select name="jobAlertsFrequency" value={userProfile.jobAlertsFrequency} onChange={handleProfileChange} disabled={!userProfile.jobAlertsEnabled}>
+                                                            <option value="daily">Daily</option>
+                                                            <option value="weekly">Weekly</option>
+                                                        </select>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+
                                     <div className="button-group profile-actions">
                                         <button onClick={handleSaveProfile} className="button button-secondary" disabled={!user}>
                                             <span className="material-icons">{profileSaved ? 'check_circle' : 'save'}</span>
-                                            {profileSaved ? 'Saved!' : 'Save Profile'}
+                                            {profileSaved ? (userProfile.jobAlertsEnabled ? 'Alerts Activated!' : 'Profile Saved!') : 'Save Profile'}
                                         </button>
                                         {!user && <p className="sign-in-prompt">Sign in to save your profile.</p>}
                                     </div>
@@ -860,7 +936,7 @@ const App = () => {
                                         {activeTab === 'text' ?
                                             <textarea value={resumeText} readOnly /> :
                                             <div className="preview-container">
-                                                {isGeneratingPreview ? <div className="loader"></div> : <PreviewRenderer content={previewContent} type={previewType} />}
+                                                {isGeneratingPreview ? <div className="loader"><div className="spinner"></div></div> : <PreviewRenderer content={previewContent} type={previewType} />}
                                             </div>
                                         }
                                     </div>
@@ -909,19 +985,31 @@ const App = () => {
                 <span>Resumate</span>
             </a>
              <div className="auth-controls">
-                {user ? (
-                    <div className="user-info">
-                         <img src={user.photoURL || undefined} alt="User avatar" className="avatar" />
-                         <span className="user-name">{user.displayName}</span>
-                         <button onClick={handleSignOut} className="button button-secondary">Sign Out</button>
-                    </div>
+                {isAuthLoading ? (
+                    <div className="spinner small" aria-label="Loading authentication status"></div>
+                ) : user ? (
+                    <>
+                        {savedJobs.length > 0 && currentView === 'main' && (
+                            <button onClick={() => setCurrentView('saved_jobs')} className="button button-secondary saved-jobs-button">
+                                <span className="material-icons">bookmark</span>
+                                <span className="saved-jobs-text">Saved</span>
+                                <span className="saved-jobs-count">{savedJobs.length}</span>
+                            </button>
+                        )}
+                        <div className="user-info">
+                            <img src={user.photoURL || undefined} alt="User avatar" className="avatar" />
+                            <span className="user-name">{user.displayName}</span>
+                            <button onClick={handleSignOut} className="button button-secondary">Sign Out</button>
+                        </div>
+                    </>
                 ) : (
-                    <button onClick={handleSignIn} className="button button-primary">Sign In</button>
+                    <button onClick={handleSignIn} className="button button-primary" disabled={!firebaseInitialized}>Sign In</button>
                 )}
             </div>
         </header>
         <main className="container">
-            {renderContent()}
+            {firebaseError && <div className="error-message persistent-error">{firebaseError}</div>}
+            {currentView === 'main' ? renderContent() : renderSavedJobs()}
         </main>
         </>
     );

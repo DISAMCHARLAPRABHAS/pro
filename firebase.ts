@@ -1,47 +1,32 @@
-// Correctly import the namespaced firebase object for v8 compatibility
-import firebase from 'firebase/compat/app';
-import 'firebase/compat/auth';
-import 'firebase/compat/firestore';
+// firebase.ts
 
-// Your web app's Firebase configuration
+import { initializeApp } from "firebase/app";
+import { getAuth, Auth } from "firebase/auth";
+import { getFirestore, Firestore } from "firebase/firestore";
+
+let firebaseInitialized = false;
+let firebaseError: string | null = null;
+let auth: Auth | null = null;
+let db: Firestore | null = null;
+
 const firebaseConfig = {
-  apiKey: "AIzaSyDwqJZ-ehCtES78zDT-jQz1xU-RkeD-O9Y",
-  authDomain: "napse123.firebaseapp.com",
-  projectId: "napse123",
-  storageBucket: "napse123.appspot.com",
-  messagingSenderId: "880397758755",
-  appId: "1:880397758755:web:b471b6959522d5efc0dc96",
-  measurementId: "G-TJVFKN0R0B"
+  apiKey: "YOUR_API_KEY",
+  authDomain: "YOUR_AUTH_DOMAIN",
+  projectId: "YOUR_PROJECT_ID",
+  storageBucket: "YOUR_STORAGE_BUCKET",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId: "YOUR_APP_ID"
 };
 
-interface FirebaseServices {
-  auth: firebase.auth.Auth | null;
-  db: firebase.firestore.Firestore | null;
-  initialized: boolean;
-  error: string | null;
+try {
+  const app = initializeApp(firebaseConfig);
+  auth = getAuth(app);
+  db = getFirestore(app);
+  firebaseInitialized = true;
+} catch (error: any) {
+  console.error("Firebase initialization error:", error);
+  firebaseInitialized = false;
+  firebaseError = error?.message || "Unknown error";
 }
 
-function initializeFirebase(): FirebaseServices {
-  if (!firebaseConfig.apiKey || !firebaseConfig.projectId) {
-    const errorMsg = "Firebase configuration is missing. Sign-in and history features are disabled.";
-    console.warn(errorMsg);
-    return { auth: null, db: null, initialized: false, error: errorMsg };
-  }
-
-  try {
-    if (!firebase.apps.length) {
-      firebase.initializeApp(firebaseConfig);
-    }
-    const auth = firebase.auth();
-    const db = firebase.firestore();
-    return { auth, db, initialized: true, error: null };
-  } catch (e) {
-    const errorMsg = "Firebase initialization failed, likely due to an invalid configuration. Sign-in and history features are disabled.";
-    console.error(errorMsg, e);
-    return { auth: null, db: null, initialized: false, error: errorMsg };
-  }
-}
-
-const { auth, db, initialized: firebaseInitialized, error: firebaseError } = initializeFirebase();
-
-export { auth, db, firebaseInitialized, firebaseError, firebase };
+export { auth, db, firebaseInitialized, firebaseError };
