@@ -6,7 +6,17 @@ import { Chart, BarController, BarElement, CategoryScale, LinearScale, Tooltip, 
 import mammoth from 'mammoth';
 import * as pdfjsLib from 'pdfjs-dist';
 import { auth, db, firebaseInitialized, firebaseError } from './firebase';
-import { onAuthStateChanged, getRedirectResult, signInWithRedirect, signOut, GoogleAuthProvider, User } from 'firebase/auth';
+// Imports for email/password auth have been added here
+import { 
+    onAuthStateChanged, 
+    getRedirectResult, 
+    signInWithRedirect, 
+    signOut, 
+    GoogleAuthProvider, 
+    User,
+    createUserWithEmailAndPassword,
+    signInWithEmailAndPassword
+} from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 
@@ -305,6 +315,10 @@ const App = () => {
     const [isAuthLoading, setIsAuthLoading] = useState(true);
     const [jobFeedback, setJobFeedback] = useState<Record<string, 'like' | 'dislike'>>({});
     const [currentView, setCurrentView] = useState<'main' | 'saved_jobs'>('main');
+
+    // New state for email/password
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
 
     // Resume preview state
     const [activeTab, setActiveTab] = useState<'text' | 'preview'>('text');
@@ -745,6 +759,55 @@ const App = () => {
         }
     };
 
+    // --- NEW FUNCTIONS FOR EMAIL/PASSWORD AUTH ---
+
+    const handleEmailSignUp = async () => {
+        if (!auth) {
+            setError("Authentication service is not available.");
+            return;
+        }
+        if (!email || !password) {
+            setError("Please enter both an email and a password.");
+            return;
+        }
+        setIsAuthLoading(true);
+        try {
+            await createUserWithEmailAndPassword(auth, email, password);
+            // onAuthStateChanged will detect the new user and log them in
+            setEmail('');
+            setPassword('');
+        } catch (error: any) {
+            console.error("Email sign up error:", error);
+            setError(error.message);
+            setIsAuthLoading(false);
+        }
+    };
+
+    const handleEmailLogin = async () => {
+        if (!auth) {
+            setError("Authentication service is not available.");
+            return;
+        }
+        if (!email || !password) {
+            setError("Please enter both an email and a password.");
+            return;
+        }
+        setIsAuthLoading(true);
+        try {
+            await signInWithEmailAndPassword(auth, email, password);
+            // onAuthStateChanged will detect the new user and log them in
+            setEmail('');
+            setPassword('');
+        } catch (error: any) {
+            console.error("Email login error:", error);
+            setError(error.message);
+            setIsAuthLoading(false);
+        }
+    };
+
+    // --- END OF NEW FUNCTIONS ---
+
+
     const renderSavedJobs = () => (
         <section className="my-saved-jobs">
             <h2>My Saved Jobs</h2>
@@ -1003,7 +1066,8 @@ const App = () => {
                         </div>
                     </>
                 ) : (
-                    <button onClick={handleSignIn} className="button button-primary" disabled={!firebaseInitialized}>Sign In</button>
+                    // You will need to replace this button with your new UI (see step 3)
+                    <button onClick={handleSignIn} className="button button-primary" disabled={!firebaseInitialized}>Sign In with Google</button>
                 )}
             </div>
         </header>
